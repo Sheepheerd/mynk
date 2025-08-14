@@ -82,6 +82,8 @@ async fn sync_files(uri: String) -> Result<(), Box<dyn Error>> {
 }
 
 fn build_post(root: &str) -> io::Result<Value> {
+    let files_array: String = "goober".to_string();
+    let summary_array: String = "goober".to_string();
     Ok(json!({
         "files": files_array,
         "summary": summary_array
