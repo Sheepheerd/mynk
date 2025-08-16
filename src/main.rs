@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn sync_files(uri: String) -> Result<(), Box<dyn Error>> {
-    compare_state();
+    build_state();
 
     let sync_uri = format!("{}/sync", uri);
 
@@ -96,6 +96,7 @@ async fn sync_files(uri: String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// MAKE THIS ALSO DELETE THE FILES
 async fn handle_response(resp_json: Value) -> std::io::Result<()> {
     let root_dir = find_mynk_root_dir().expect("Could not find .mynk root");
 
@@ -182,16 +183,8 @@ fn create_root_state() {
     }
 }
 
-fn compare_state() {
-    let mynk_state_path = find_mynk_state_root();
-
-    let state_file_path = match mynk_state_path {
-        Some(path) => path,
-        None => {
-            eprintln!("No .mynk-state.json file found. Please run 'mynk init --uri <URI>' first.");
-            return;
-        }
-    };
+fn build_state() {
+    let state_file_path = find_mynk_state_root().unwrap();
 
     let metadata = std::fs::metadata(&state_file_path).expect("Failed to read file metadata");
     let old_vec: Vec<FileEntry> = if metadata.len() == 0 {
@@ -201,13 +194,7 @@ fn compare_state() {
         serde_json::from_reader(file).expect("Failed to parse .mynk-state.json")
     };
 
-    let root_dir = match find_mynk_root_dir() {
-        Some(dir) => dir,
-        None => {
-            eprintln!("No root dir");
-            return;
-        }
-    };
+    let root_dir = find_mynk_root_dir().unwrap();
 
     let mut new_vec = Vec::<FileEntry>::new();
     for entry in WalkDir::new(root_dir.clone())
@@ -287,11 +274,13 @@ fn compare_state_keys(
                 );
             }
             (Some(new_entry), Some(old_entry)) => {
-                if old_entry.hash != new_entry.hash {
+                if old_entry.action == "delete" && new_entry.action == "create" {
+                    continue;
+                } else if old_entry.hash != new_entry.hash {
                     new_entry.action = "edit".to_string();
                     new_entry.version = old_entry.version + 1;
                 } else {
-                    new_entry.action = "".to_string();
+                    new_entry.action = "pass".to_string();
                     new_entry.version = old_entry.version;
                 }
             }
@@ -305,16 +294,7 @@ fn compare_state_keys(
 fn build_post() -> io::Result<Value> {
     let mynk_state_path = find_mynk_state_root();
 
-    let state_file_path = match mynk_state_path {
-        Some(path) => path,
-        None => {
-            eprintln!("No .mynk-state.json file found. Please run 'mynk init --uri <URI>' first.");
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "No .mynk-state.json file found",
-            ));
-        }
-    };
+    let state_file_path = mynk_state_path.unwrap();
 
     let new_vec: Vec<FileEntry> = {
         let file = File::open(&state_file_path).expect("Failed to open .mynk-state.json");
@@ -327,6 +307,7 @@ fn build_post() -> io::Result<Value> {
 
     let files_array: Vec<Value> = new_vec
         .iter()
+        .filter(|entry| entry.action != "pass")
         .map(|entry| {
             let file_path = root_dir.join(&entry.filename);
             let content = std::fs::read_to_string(&file_path).unwrap_or_default();
