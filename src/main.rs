@@ -76,6 +76,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn sync_files(uri: String) -> Result<(), Box<dyn Error>> {
+    compare_state();
+
+    let sync_uri = format!("{}/sync", uri);
+
+    let summary_json: Value = build_post()?;
+
+    let client = reqwest::Client::new();
+    let resp = client.post(&sync_uri).json(&summary_json).send().await?;
+
+    if resp.status().is_success() {
+        let resp_json = resp.json::<serde_json::Value>().await?;
+        handle_response(resp_json).await?;
+    } else {
+        eprintln!("Sync failed: {}", resp.status());
+    }
+
+    Ok(())
+}
+
+async fn handle_response(resp_json: Value) -> std::io::Result<()> {
+    let root_dir = find_mynk_root_dir().expect("Could not find .mynk root");
+
+    if let Value::Array(files) = resp_json {
+        for file_obj in files {
+            if let Value::Object(map) = file_obj {
+                let filename = map
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .expect("filename missing");
+                let contents = map.get("contents").and_then(Value::as_str).unwrap_or("");
+
+                let full_path = root_dir.join(filename);
+
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                fs::write(&full_path, contents)?;
+                println!("Wrote file: {}", full_path.display());
+            }
+        }
+    } else {
+        eprintln!("Expected JSON array in response");
+    }
+    Ok(())
+}
+
 fn find_mynk_root_dir() -> Option<PathBuf> {
     let current_dir = std::env::current_dir().ok()?;
     let mut mynk_dir: Option<PathBuf> = None;
@@ -252,25 +300,6 @@ fn compare_state_keys(
     }
 
     new_map
-}
-
-async fn sync_files(uri: String) -> Result<(), Box<dyn Error>> {
-    compare_state();
-
-    let sync_uri = format!("{}/sync", uri);
-
-    let summary_json: Value = build_post()?;
-
-    let client = reqwest::Client::new();
-    let resp = client.post(&sync_uri).json(&summary_json).send().await?;
-
-    if resp.status().is_success() {
-        println!("Sync successful: {}", resp.text().await?);
-    } else {
-        eprintln!("Sync failed: {}", resp.status());
-    }
-
-    Ok(())
 }
 
 fn build_post() -> io::Result<Value> {
