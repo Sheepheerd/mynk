@@ -15,7 +15,7 @@ use walkdir::WalkDir;
 struct FileEntry {
     filename: String,
     hash: String,
-    version: u32,
+    version: u64,
     action: String,
 }
 
@@ -49,7 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match matches.subcommand() {
         Some(("sync", _)) => {
             println!("Syncing directory...");
-            // walk the dir up till you find .mynk
             let mynk_path = find_mynk_root();
             if let Some(path) = mynk_path {
                 println!("Found .mynk at: {}", path.display());
@@ -96,9 +95,24 @@ async fn sync_files(uri: String) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// MAKE THIS ALSO DELETE THE FILES
 async fn handle_response(resp_json: Value) -> std::io::Result<()> {
     let root_dir = find_mynk_root_dir().expect("Could not find .mynk root");
+    let state_file_path = find_mynk_state_root().expect("Could not find .mynk-state.json");
+
+    // This might cause problems with an empty state
+    let state_vec: Vec<FileEntry> = if fs::metadata(&state_file_path)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true)
+    {
+        Vec::new()
+    } else {
+        let file = File::open(&state_file_path)?;
+        serde_json::from_reader(file)?
+    };
+    let mut state_map: HashMap<String, FileEntry> = state_vec
+        .into_iter()
+        .map(|entry| (entry.filename.clone(), entry))
+        .collect();
 
     if let Value::Array(files) = resp_json {
         for file_obj in files {
@@ -107,21 +121,61 @@ async fn handle_response(resp_json: Value) -> std::io::Result<()> {
                     .get("filename")
                     .and_then(Value::as_str)
                     .expect("filename missing");
-                let contents = map.get("contents").and_then(Value::as_str).unwrap_or("");
-
+                let action = map
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("create");
+                let version = map.get("version").and_then(Value::as_u64).unwrap_or(1);
                 let full_path = root_dir.join(filename);
 
-                if let Some(parent) = full_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
+                match action {
+                    "delete" => {
+                        if full_path.exists() {
+                            fs::remove_file(&full_path)?;
+                            println!("Deleted file: {}", full_path.display());
+                        }
+                        state_map.remove(filename);
+                    }
+                    _ => {
+                        let contents = map.get("contents").and_then(Value::as_str).unwrap_or("");
+                        if let Some(parent) = full_path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::write(&full_path, contents)?;
+                        println!("Wrote file: {}", full_path.display());
 
-                fs::write(&full_path, contents)?;
-                println!("Wrote file: {}", full_path.display());
+                        let hash = if contents.is_empty() {
+                            String::new()
+                        } else {
+                            let bytes = fs::read(&full_path)?;
+                            sha256::digest(&bytes)
+                        };
+
+                        state_map.insert(
+                            filename.to_string(),
+                            FileEntry {
+                                filename: filename.to_string(),
+                                hash,
+                                version: version,
+                                action: "pass".to_string(),
+                            },
+                        );
+                    }
+                }
             }
         }
     } else {
         eprintln!("Expected JSON array in response");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Expected JSON array in response",
+        ));
     }
+
+    let updated_vec: Vec<FileEntry> = state_map.into_values().collect();
+    let json = serde_json::to_string_pretty(&updated_vec)?;
+    fs::write(&state_file_path, json)?;
+
     Ok(())
 }
 
@@ -207,7 +261,6 @@ fn build_state() {
         let bytes = std::fs::read(entry.path()).unwrap();
         let hash = sha256::digest(&bytes);
 
-        // Get relative path from root_dir
         let rel_path = entry
             .path()
             .strip_prefix(&root_dir)
@@ -254,7 +307,6 @@ fn compare_state_keys(
     let old_keys: HashSet<_> = old_map.keys().cloned().collect();
     let new_keys: HashSet<_> = new_map.keys().cloned().collect();
 
-    // Union of all filenames
     let all_keys: HashSet<_> = old_keys.union(&new_keys).cloned().collect();
 
     for filename in all_keys {
@@ -263,18 +315,22 @@ fn compare_state_keys(
                 new_entry.action = "create".to_string();
             }
             (None, Some(old_entry)) => {
-                new_map.insert(
-                    filename.clone(),
-                    FileEntry {
-                        filename: filename.clone(),
-                        hash: old_entry.hash.clone(),
-                        version: old_entry.version,
-                        action: "delete".to_string(),
-                    },
-                );
+                if old_entry.action == "delete" {
+                    continue;
+                } else {
+                    new_map.insert(
+                        filename.clone(),
+                        FileEntry {
+                            filename: filename.clone(),
+                            hash: old_entry.hash.clone(),
+                            version: old_entry.version,
+                            action: "delete".to_string(),
+                        },
+                    );
+                }
             }
             (Some(new_entry), Some(old_entry)) => {
-                if old_entry.action == "delete" && new_entry.action == "create" {
+                if old_entry.action == "delete" {
                     continue;
                 } else if old_entry.hash != new_entry.hash {
                     new_entry.action = "edit".to_string();
@@ -331,8 +387,9 @@ fn build_post() -> io::Result<Value> {
             })
         })
         .collect();
+
     println!(
-        "{}",
+        " this is the post {}",
         json!({
             "files": files_array,
             "summary": summary_array
